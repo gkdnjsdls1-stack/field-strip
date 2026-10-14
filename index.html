@@ -1,0 +1,1126 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>야전분해 연습 3D</title>
+<style>
+  :root { color-scheme: dark; --bg:#14161a; --fg:#e8e8e8; --hit:#4ea1ff; --bad:#ff5d5d;
+          --line:#4e5560; --dim:#b9bec7; }
+  html,body { height:100%; }
+  /* 흐름 레이아웃. 고정 inset 을 쓰면 헤더가 2줄로 꺾이는 폭에서 캔버스가 설명줄을 덮는다. */
+  body { margin:0; background:var(--bg); color:var(--fg); overflow:hidden;
+         display:flex; flex-direction:column;
+         font:16px/1.5 -apple-system,system-ui,sans-serif; }
+  header { display:flex; gap:8px; align-items:center; padding:10px 16px; flex-wrap:wrap; flex:none; }
+  h1 { font-size:16px; margin:0 8px 0 0; font-weight:600; }
+  button, select { background:#22262d; color:var(--fg); border:1px solid var(--line); border-radius:8px;
+                   padding:9px 14px; font:inherit; cursor:pointer; }
+  button[aria-pressed=true] { background:var(--hit); border-color:var(--hit); color:#071018; }
+  /* 보조 조작은 고스트로 낮춘다. 안 그러면 "소리 켜짐"이 "지금 이 모드"와 같은 파랑으로 읽힌다. */
+  #reset, #sound, #eye, #gun { background:transparent; color:var(--dim); }
+  #sound[aria-pressed=true] { background:#22262d; color:var(--fg); border-color:#5d6572; }
+  /* 눌린 버튼(파랑) 위에서도 보이게 안쪽 어두운 링 + 바깥 밝은 링. */
+  button:focus-visible, select:focus-visible {
+    outline:2px solid var(--bg); outline-offset:0; box-shadow:0 0 0 4px var(--fg); }
+  #hud { padding:0 16px; min-height:3.6em; flex:none; max-width:72ch; margin:0 auto; text-align:center; }
+  #hud b { color:var(--hit); }
+  #hud .bad { color:var(--bad); font-weight:600; }
+  #hud .n { color:var(--dim); }
+  #view { position:relative; flex:1; min-height:0; }
+  /* 자세 토글은 모드 선택이 아니라 사격 중 조작이라 화면 안에 둔다. 헤더까지 손이 안 간다. */
+  #ads { position:absolute; right:16px; bottom:40px; z-index:2; padding:11px 18px; }
+  #ads .k { font-size:12px; opacity:.65; border:1px solid currentColor; border-radius:4px;
+            padding:0 5px; margin-left:4px; }
+  #view canvas { display:block; width:100%; height:100%; touch-action:none; cursor:grab; }
+  #view canvas:active { cursor:grabbing; }
+  /* 캔버스 위에 떠 있다. 밝은 부품이 밑으로 오면 그림자 없이는 안 읽힌다. */
+  #tip { position:fixed; bottom:8px; left:0; right:0; text-align:center;
+         font-size:13px; color:#8a8f98; pointer-events:none;
+         text-shadow:0 1px 3px var(--bg), 0 0 8px var(--bg); }
+</style>
+
+<header>
+  <h1>야전분해 연습</h1>
+  <select id="gun" aria-label="총 종류"></select>
+  <button id="learn" aria-pressed="true">학습</button>
+  <button id="game"  aria-pressed="false">게임</button>
+  <button id="fire"  aria-pressed="false">사격</button>
+  <button id="reset">다시</button>
+  <button id="sound" aria-pressed="true">소리</button>
+  <button id="eye">시점</button>
+</header>
+<div id="hud" aria-live="polite"></div>
+<div id="view"><button id="ads" aria-pressed="false" hidden>정조준 <span class="k">A</span></button></div>
+<div id="tip"></div>
+
+<script type="importmap">
+{ "imports": {
+    "three": "./node_modules/three/build/three.module.js",
+    "three/addons/": "./node_modules/three/examples/jsm/"
+} }
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { SVGLoader } from 'three/addons/loaders/SVGLoader.js';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GUNS, GUN_IDS, partsOf, orderOf, init, expected, tap } from './strip.js';
+import { SHAPES, RIG, LOOK, FRAME_LOOK } from './shapes.js';
+
+const el = id => document.getElementById(id);
+const label = id => partsOf(gun).find(p => p.id === id)?.ko ?? id;
+const V = (x, y, z) => new THREE.Vector3(x, y, z);
+const rig = () => RIG[gun];                  // 총구·배출구·작동 방식
+const FEED = () => RIG[gun].feed;            // 총알이 들어가는 부품: 탄창 또는 실린더
+const isRev = () => RIG[gun].action === 'revolver';
+
+/* ---------- 장면 ---------- */
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14161a);
+const camera = new THREE.PerspectiveCamera(32, 1, 1, 5000);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.15;
+const view = el('view');
+// 임베드된 패널에서 레이아웃을 0 으로 보고하는 경우가 있어 문서 크기로 대체한다.
+function viewRect() {
+  const r = renderer.domElement.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0) return r;
+  const de = document.documentElement;
+  const top = view.getBoundingClientRect().top || 118;
+  const w = de.clientWidth || innerWidth || 1280;
+  const h = (de.clientHeight || innerHeight || 720) - top;
+  // 높이가 0 이하로 나오는 환경이 있다. 그대로 쓰면 조준·집기 좌표가 화면 밖으로 발산한다.
+  return h > 0 ? { left: 0, top, width: w, height: h } : { left: 0, top: 0, width: w, height: w * 0.6 };
+}
+view.appendChild(renderer.domElement);
+
+// metalness 높은 재질은 반사할 환경이 없으면 까맣게 나온다. 환경맵이 그 역할.
+const pmrem = new THREE.PMREMGenerator(renderer);
+scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+scene.environmentIntensity = 1.15;
+
+scene.add(new THREE.HemisphereLight(0x9fb4d4, 0x1a1d22, 0.8));
+const key = new THREE.DirectionalLight(0xffffff, 2.2); key.position.set(-420, 520, 540); scene.add(key);
+const rim = new THREE.DirectionalLight(0x7fa8ff, 0.9); rim.position.set(450, 120, -420); scene.add(rim);
+
+const pivot = new THREE.Group();          // SVG 는 y가 아래로 증가하므로 통째로 뒤집는다
+pivot.rotation.x = Math.PI;
+scene.add(pivot);
+// aim 은 총 중심에서 회전한다. model 바로 돌리면 모델 원점(화면 밖)을 중심으로 돌아 총이 궤도를 그린다.
+const aim = new THREE.Group();
+pivot.add(aim);
+const model = new THREE.Group();          // 부품만
+aim.add(model);
+const range = new THREE.Group();          // 과녁·트레이·탄피. 총이 조준으로 기울어도 같이 안 기운다.
+pivot.add(range);
+
+const flashLight = new THREE.PointLight(0xffb24a, 0, 1200, 2);
+model.add(flashLight);
+const zPlane = new THREE.Plane(V(0, 0, 1), 0);   // 과녁도 부품도 전부 이 평면 위에 있다
+
+/* ---------- 부품 만들기 ---------- */
+const mat = o => new THREE.MeshStandardMaterial({ side: THREE.DoubleSide, ...o });
+let gun = GUN_IDS[0];
+let part = {};                   // id -> { obj, mats, dir, pull, slot, t, tt, bb, c0 }
+const gunCenter = V();
+let fitStrip = null, fitFire = null, fitLoad = null;
+
+// 담아야 할 범위가 셋이다: 분해(자리에 놓은 것까지) / 장전(총과 탄약) / 사격(사선).
+// 대각선 하나로 맞추면 정사각형에 가까운 배치에서 세로가 아슬아슬하게 잘린다.
+// 시점이 돌면 깊이가 가로로도 세로로도 오므로 깊이를 양쪽에 함께 센다.
+function fitOf(box) {
+  const sz = box.getSize(V());
+  return { center: box.getCenter(V()), w: Math.max(sz.x, sz.z), h: Math.max(sz.y, sz.z) };
+}
+
+// 시점만 옮기고 범위를 안 옮기면 장전 중에 총이 저 멀리 작게 남는다. 둘이 같이 가야 한다.
+const fitNow = () =>
+  (mode !== 'fire' ? fitStrip : (fire && !fire.magOut) ? fitFire : fitLoad) || fitStrip;
+
+// 범위도 시점처럼 보간한다. 갑자기 바꾸면 화면이 튄다. k=1 즉시, k=0 현재 값으로 다시 적용.
+const curFit = { center: V(), w: 1, h: 1 };
+function stepFit(k) {
+  const f = fitNow();
+  if (!f) return;
+  curFit.center.lerp(f.center, k);
+  curFit.w += (f.w - curFit.w) * k;
+  curFit.h += (f.h - curFit.h) * k;
+  model.position.copy(gunCenter).negate();
+  aim.position.copy(gunCenter).sub(curFit.center);
+  range.position.copy(curFit.center).negate();
+  const vt = Math.tan(camera.fov * Math.PI / 360);
+  dist = 1.12 * Math.max(curFit.h / 2 / vt, curFit.w / 2 / (vt * camera.aspect));
+}
+const applyFit = () => stepFit(1);
+
+function disposeTree(root) {
+  root.traverse(o => {
+    if (o.geometry) o.geometry.dispose();
+    for (const m of [o.material].flat()) m?.dispose?.();
+  });
+}
+
+function build(g) {
+  disposeTree(model);
+  model.clear();
+  model.add(flashLight);
+  model.position.set(0, 0, 0);
+  model.rotation.set(0, 0, 0);
+  part = {}; rounds = []; brass = [];
+
+  const SH = SHAPES[g];
+  const ids = Object.keys(SH);
+  const svgText = `<svg xmlns="http://www.w3.org/2000/svg">` + ids
+    .filter(id => SH[id].d)
+    .map(id => `<path id="${id}" fill-rule="${(SH[id].evenodd || id === 'frame') ? 'evenodd' : 'nonzero'}" d="${SH[id].d}"/>`)
+    .join('') + `</svg>`;
+  const parsed = new SVGLoader().parse(svgText).paths;
+
+  let pi = 0;
+  for (const id of ids) {
+    const c = SH[id];
+    const obj = new THREE.Group();
+    const look = (id === 'frame' && FRAME_LOOK[g]) ? FRAME_LOOK[g] : LOOK[id];
+    const mats = [];
+
+    if (c.d) {
+      for (const shape of SVGLoader.createShapes(parsed[pi++])) {
+        const geo = new THREE.ExtrudeGeometry(shape, {
+          depth: c.depth, bevelEnabled: true, bevelThickness: 3, bevelSize: 3,
+          bevelSegments: 3, curveSegments: 14,   // 모서리가 둥글어야 1인칭에서 판자로 안 보인다
+        });
+        geo.translate(0, 0, -c.depth / 2);
+        const m = mat(look); mats.push(m);
+        obj.add(new THREE.Mesh(geo, m));
+      }
+    } else if (c.cyl) {
+      // 자기 축으로 돌아야 해서 압출이 아니라 원통이다. 안쪽 그룹을 두고 그걸 돌린다 —
+      // 부품 그룹을 돌리면 모델 원점을 중심으로 돌아 실린더가 궤도를 그린다.
+      const [x0, x1, cy, r, nch] = c.cyl, len = x1 - x0;
+      const spin = new THREE.Group();
+      spin.position.set((x0 + x1) / 2, cy, 0);
+      obj.add(spin);
+      const body = mat(look); mats.push(body);
+      const bg = new THREE.CylinderGeometry(r, r, len, 28); bg.rotateZ(Math.PI / 2);
+      spin.add(new THREE.Mesh(bg, body));
+      // 약실은 구멍을 뚫는 대신 어두운 통을 몸통보다 길게 넣어 양 끝이 구멍으로 읽히게 한다.
+      const hole = mat({ ...look, color: 0x23272d, metalness: 0.5 }); mats.push(hole);
+      const cr = r - 11;
+      for (let i = 0; i < nch; i++) {
+        const a = i / nch * Math.PI * 2;
+        const cg = new THREE.CylinderGeometry(8.5, 8.5, len + 4, 14); cg.rotateZ(Math.PI / 2);
+        cg.translate(0, Math.cos(a) * cr, Math.sin(a) * cr);
+        spin.add(new THREE.Mesh(cg, hole));
+      }
+      obj.userData.spin = spin; obj.userData.cr = cr; obj.userData.nch = nch;
+    } else {
+      // 헬릭스라 경로 대신 코드로 만든다. 반지름 2.0 이면 화면에서 3px 선이라 하이라이트가 얹힐 면이 없다.
+      const [x0, x1, cy, r] = c.coil, len = x1 - x0, pts = [];
+      for (let i = 0; i <= 220; i++) {
+        const u = i / 220, a = u * Math.PI * 2 * 17;
+        pts.push(V(x0 + u * len, cy + Math.cos(a) * r, Math.sin(a) * r));
+      }
+      const coil = mat(look); mats.push(coil);
+      obj.add(new THREE.Mesh(new THREE.TubeGeometry(
+        new THREE.CatmullRomCurve3(pts), 440, 2.6, 8, false), coil));
+
+      const rod = mat(look); mats.push(rod);
+      const rodG = new THREE.CylinderGeometry(3.6, 3.6, len, 14);
+      rodG.rotateZ(Math.PI / 2); rodG.translate(x0 + len / 2, cy, 0);
+      obj.add(new THREE.Mesh(rodG, rod));
+
+      const cap = mat(look); mats.push(cap);
+      const capG = new THREE.CylinderGeometry(10, 10, 6, 18);
+      capG.rotateZ(Math.PI / 2); capG.translate(x0 - 2, cy, 0);
+      obj.add(new THREE.Mesh(capG, cap));
+    }
+
+    obj.traverse(o => { o.userData.part = id; });
+    model.add(obj);
+    // bbox 는 반드시 지오메트리에서 직접 모은다. setFromObject 는 월드 행렬을 쓰는데
+    // 거기엔 pivot 의 180도 회전이 섞여 있어, 총을 바꾸면 화면 맞춤이 통째로 어긋난다.
+    const bb = new THREE.Box3();
+    if (c.cyl) {
+      // 실린더는 지오메트리가 원점에 있고 오프셋이 안쪽 그룹에 있다. 그대로 모으면
+      // 집기 판정·화면 맞춤·탄약 위치가 전부 모델 원점으로 끌려간다. 제원에서 바로 만든다.
+      const [x0, x1, cy, r] = c.cyl;
+      bb.set(V(x0, cy - r, -r), V(x1, cy + r, r));
+    } else {
+      obj.traverse(o => { if (o.geometry) { o.geometry.computeBoundingBox(); bb.union(o.geometry.boundingBox); } });
+    }
+    part[id] = { id, obj, mats, bb, c0: bb.getCenter(V()), t: 0, tt: 0,
+                 dir: V(...c.axis).normalize(), pull: c.pull };
+  }
+
+  // 가늠쇠·리브는 bb 를 재기 전에 붙여야 한다. 나중에 붙이면 슬라이드 윗면이 bb 밖이라
+  // 화면 맞춤이 그만큼 모자라 장전 화면에서 가늠쇠가 잘린다.
+  buildSights(g);
+
+  // 분해한 부품을 놓을 자리. 실제로 분해하면 테이블에 가지런히 늘어놓는다.
+  // 총 폭을 한 줄로 삼고 넘치면 다음 줄로 내린다. 긴 부품은 자연히 한 줄을 차지한다.
+  // 줄 폭은 총 폭의 1.8배. 총 폭에 맞추면 긴 부품이 한 줄씩 차지해 네 줄이 되고,
+  // 세로로 길어진 화면은 궤도 카메라에서 뒤로 멀어져 보인다.
+  const fb = part.frame.bb, GAP = 26;
+  const laneW = (fb.max.x - fb.min.x) * 1.8;
+  const lane0 = (fb.min.x + fb.max.x) / 2 - laneW / 2;
+  let lx = lane0, ly = fb.max.y + 80, rowH = 0;
+  for (const id of orderOf(g)) {
+    const bb = part[id].bb, pw = bb.max.x - bb.min.x, ph = bb.max.y - bb.min.y;
+    if (lx > lane0 && lx + pw > lane0 + laneW) { lx = lane0; ly += rowH + GAP; rowH = 0; }
+    part[id].slot = V(lx - bb.min.x, ly - bb.min.y, 0);
+    lx += pw + GAP; rowH = Math.max(rowH, ph);
+  }
+
+  // 총 자체의 중심. 조준 회전축이자 model 의 기준점이다.
+  gunCenter.set(0, 0, 0);
+  const home = new THREE.Box3();
+  for (const id of ids) home.union(part[id].bb);
+  home.getCenter(gunCenter);
+
+  // 분해 화면은 "축으로 빠진 상태 + 자리에 놓인 상태"를 다 담아야 한다.
+  const box = home.clone();
+  for (const id of ids) {
+    const q = part[id];
+    box.union(q.bb.clone().translate(q.dir.clone().multiplyScalar(q.pull * (q.slot ? LIFT : 1))));
+    if (q.slot) box.union(q.bb.clone().translate(q.slot));
+  }
+  fitStrip = fitOf(box);
+
+  // 보이지 않는 여유 박스를 씌워 집기 판정을 넓힌다. 스프링처럼 얇은 부품은 실제 형상으론 잘 안 집힌다.
+  for (const p of partsOf(g)) {
+    const q = part[p.id], bb = q.bb;
+    const sz = bb.getSize(V()).addScalar(12);
+    const proxy = new THREE.Mesh(new THREE.BoxGeometry(sz.x, sz.y, sz.z),
+                                 new THREE.MeshBasicMaterial({ visible: false }));
+    proxy.position.copy(bb.getCenter(V()));
+    proxy.userData.part = p.id;
+    q.obj.add(proxy);
+  }
+  buildAmmo();
+  buildRange();
+  applyFit();
+}
+
+// 1인칭에서는 압출 단면(총 뒤통수)만 보인다. 가늠자 사이로 가늠쇠를 보는 그림이 있어야
+// "총을 들고 있다"로 읽힌다. 측면도에 없는 부품이라 여기서 얹는다.
+function buildSights(g) {
+  const sp = RIG[g].sights;
+  if (!sp) return;
+  const [fx, rx, ty, hostId] = sp, host = part[hostId];
+  if (!host) return;
+  const m = mat({ color: 0x15181d, metalness: 0.3, roughness: 0.55 });
+  host.mats.push(m);
+  const zw = (host.bb.max.z - host.bb.min.z) * 0.86;
+  const add = (w, h, d, x, z, mm) => {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mm || m);
+    b.position.set(x, ty - h / 2 + 1, z);
+    b.userData.part = hostId;
+    host.obj.add(b);
+    host.bb.expandByPoint(V(x - w / 2, ty - h + 1, z - d / 2));
+    host.bb.expandByPoint(V(x + w / 2, ty + 1, z + d / 2));
+  };
+  add(16, 15, 7, fx, 0);                   // 가늠쇠
+  add(11, 13, 8, rx, -10);                 // 가늠자 — 가운데를 비워 홈을 만든다
+  add(11, 13, 8, rx, 10);
+
+  // 윗면 리브와 뒤쪽 세레이션. 민무늬 판자에 선을 그어야 "총 윗면"으로 읽힌다.
+  const steel = mat({ ...LOOK[hostId], roughness: (LOOK[hostId].roughness || 0.3) + 0.12 });
+  host.mats.push(steel);
+  add(rx - fx, 4, 12, (fx + rx) / 2, 0, steel);
+  for (let i = 0; i < 6; i++) add(5, 4, zw, rx - 34 - i * 13, 0, steel);
+}
+
+// 부품이 t 에서 있어야 할 위치. 앞 구간은 실제로 빠지는 축(방향을 가르치는 부분),
+// 뒤 구간은 테이블 자리로 가는 이동이다. 사격 모드에서는 자리가 없고 축만 쓴다.
+const SEG = 0.45;                 // 여기까지가 축 구간, 나머지가 자리로 가는 구간
+const LIFT = 0.5;                 // 축으로는 pull 의 절반만 뺀다. 방향만 보이면 되고, 멀리 던지면 화면이 커진다.
+const flatPath = q => mode === 'fire' || !q.slot;
+const elbowOf = q => { const a = axisOf(q);
+                       return a.dir.clone().multiplyScalar(a.pull * (flatPath(q) ? 1 : LIFT)); };
+function posOf(q, t, out) {
+  out.copy(elbowOf(q));
+  if (flatPath(q)) return out.multiplyScalar(t);
+  if (t <= SEG) return out.multiplyScalar(t / SEG);
+  return out.lerp(q.slot, (t - SEG) / (1 - SEG));
+}
+// 지금 구간의 "t 가 1 늘 때 움직이는 벡터". 끌기 투영이 구간마다 맞아야 손이 안 어긋난다.
+function stepOf(q, t) {
+  const elbow = elbowOf(q);
+  if (flatPath(q)) return elbow;
+  if (t <= SEG) return elbow.divideScalar(SEG);
+  return q.slot.clone().sub(elbow).divideScalar(1 - SEG);
+}
+
+/* ---------- 탄약 (사격 모드) ---------- */
+const MAG = 6;      // ponytail: 6발. 실총은 15~17발이지만 클릭만 열일곱 번이라 지루하다.
+let rounds = [];    // [{ mesh, in:'tray'|'mag'|'gone', home }]
+let brass = [];     // 날아가는 빈 탄피
+const tagRound = (r, on) => r.mesh.traverse(o => { o.userData.part = on ? 'round' : null; });
+const muzzle = V(), port = V();
+
+function makeRound() {
+  const g = new THREE.Group();
+  const caseG = new THREE.CylinderGeometry(4.6, 4.6, 17, 14);
+  caseG.rotateZ(Math.PI / 2); caseG.translate(-2, 0, 0);
+  g.add(new THREE.Mesh(caseG, mat({ color: 0xb98b35, metalness: 0.85, roughness: 0.3 })));
+  const tipG = new THREE.ConeGeometry(4.6, 9, 14);
+  tipG.rotateZ(Math.PI / 2); tipG.translate(-14, 0, 0);   // 탄두가 총구 쪽(-x)을 본다
+  g.add(new THREE.Mesh(tipG, mat({ color: 0xc2703a, metalness: 0.8, roughness: 0.35 })));
+  return g;
+}
+
+function buildAmmo() {
+  const R = rig();
+  muzzle.set(...R.muzzle, 0);
+  port.set(...(R.port || R.muzzle), 0);
+  for (let i = 0; i < MAG; i++) {
+    const m = makeRound();
+    const hit = new THREE.Mesh(new THREE.BoxGeometry(32, 24, 24),
+                               new THREE.MeshBasicMaterial({ visible: false }));
+    hit.position.set(-6, 0, 0);
+    m.add(hit);
+    m.traverse(o => { o.userData.part = 'round'; });
+    // 트레이는 프레임(= 총 전체) 아래에 깐다. 탄창/실린더 기준으로 잡으면 총 안으로 들어온다.
+    m.position.set(150 + i * 34, part.frame.bb.max.y + 70, 0);
+    m.visible = false;                                    // 사격 모드에서만 꺼낸다
+    range.add(m);
+    rounds.push({ mesh: m, in: 'tray', home: m.position.clone() });
+  }
+}
+// 넣은 탄약은 탄창(또는 실린더)을 따라다녀야 한다. 부모를 바꾸면 위치 계산이 공짜다.
+function restack() {
+  const held = rounds.filter(r => r.in === 'mag');
+  if (isRev()) {                                  // 약실 여섯 개에 하나씩. 실린더가 돌면 같이 돈다.
+    const u = part.cylinder.obj.userData;
+    held.forEach((r, i) => {
+      const a = i / u.nch * Math.PI * 2;
+      r.mesh.position.set(6, Math.cos(a) * u.cr, Math.sin(a) * u.cr);
+    });
+    return;
+  }
+  const mb = part.magazine.bb, cx = (mb.min.x + mb.max.x) / 2;
+  held.forEach((r, i) => r.mesh.position.set(cx - 2, mb.min.y + 28 + (held.length - 1 - i) * 11, 0));
+}
+const feedHost = () => isRev() ? part.cylinder.obj.userData.spin : part.magazine.obj;
+
+/* ---------- 사격장 ---------- */
+// 사선은 총구(-x) 쪽으로 뻗는다. 과녁은 거리(x) · 높이(y) · 좌우(z) 를 다 다르게 둔다.
+// z 를 안 쓰면 모든 게 한 평면에 놓여 아무리 돌려도 그림처럼 납작해 보인다. 깊이는 여기서 나온다.
+// [거리, 높이, 좌우]
+// 1인칭은 거리 차이가 곧 크기 차이다. 가까운 것과 먼 것의 비가 작으면 아무리 3D 라도 평평하다.
+// 220 ~ 2500 으로 벌려 열 배 이상 차이를 준다. 먼 과녁일수록 좌우로도 넓게 흩는다.
+const TGT = [
+  [ -220,  40, -190], [ -330, 200,  170],
+  [ -850,  10,  120], [ -980, 230, -250],
+  [-2100,  60,  330], [-2450, 210, -210],
+];
+const TR = 38, AIM_MAX = 0.62;
+const FLOOR = 400;                 // 바닥 높이(SVG 기준 +y 가 아래라 총보다 큰 값)
+let targets = [];
+let aimA = 0, aimB = 0;            // 상하(z축 회전) / 좌우(y축 회전)
+const aimE = new THREE.Euler(0, 0, 0, 'YZX');
+let lane = null;
+
+function buildRange() {
+  for (const t of targets) { range.remove(t.mesh); disposeTree(t.mesh); }
+  targets = [];
+  if (lane) { range.remove(lane); disposeTree(lane); }
+
+  // 바닥과 거리 표시줄. 원근으로 모이는 선이 깊이를 가장 싸게 말해준다.
+  lane = new THREE.Group();
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(4400, 1500),
+                               mat({ color: 0x1b1f26, roughness: 0.96, metalness: 0 }));
+  floor.rotation.x = Math.PI / 2;
+  floor.position.set(-1400, FLOOR, 0);  // 총 발밑부터 사선 끝까지. 끊기면 깊이가 거기서 멈춘다
+  lane.add(floor);
+  for (let i = 1; i <= 9; i++) {         // 원근으로 모이는 가로줄이 거리를 말해준다
+    const bar = new THREE.Mesh(new THREE.BoxGeometry(8, 2, 1300),
+                               mat({ color: 0x323945, roughness: 0.9, metalness: 0 }));
+    bar.position.set(-i * 310, FLOOR - 1, 0);
+    lane.add(bar);
+  }
+  // 사선 끝 벽. 없으면 지평선 위가 그냥 검은 공간이라 "방"으로 안 읽힌다.
+  const wall = new THREE.Mesh(new THREE.PlaneGeometry(1500, 620),
+                              mat({ color: 0x171b21, roughness: 0.98, metalness: 0 }));
+  wall.position.set(-3000, FLOOR - 310, 0);
+  wall.rotation.y = -Math.PI / 2;
+  lane.add(wall);
+
+  lane.visible = false;
+  range.add(lane);
+
+  for (const [x, y, z] of TGT) {
+    const g = new THREE.Group();
+    // 과녁 면은 사선을 마주본다. 기둥이 바닥까지 내려와야 "떠 있는 그림"이 아니게 된다.
+    const face = new THREE.CylinderGeometry(TR, TR, 6, 28); face.rotateZ(Math.PI / 2);
+    g.add(new THREE.Mesh(face, mat({ color: 0xd8dde3, metalness: 0.08, roughness: 0.7 })));
+    const dot = new THREE.CylinderGeometry(TR * 0.4, TR * 0.4, 9, 24); dot.rotateZ(Math.PI / 2);
+    dot.translate(2, 0, 0);
+    g.add(new THREE.Mesh(dot, mat({ color: 0xc0392b, metalness: 0.08, roughness: 0.6 })));
+    const h = FLOOR - y;
+    const post = new THREE.Mesh(new THREE.BoxGeometry(14, h, 14),
+                                mat({ color: 0x4a515c, roughness: 0.85, metalness: 0.2 }));
+    post.position.set(0, h / 2, 0);
+    g.add(post);
+    g.position.set(x, y, z);
+    g.visible = false;
+    range.add(g);
+    targets.push({ mesh: g, p: V(x, y, z), down: false, fell: 0 });
+  }
+
+  // 장전 화면은 총과 탄약만 담는다.
+  const gb = new THREE.Box3();
+  for (const id of Object.keys(part)) gb.union(part[id].bb);
+  const fp = part[FEED()];
+  gb.union(fp.bb.clone().translate(fp.dir.clone().multiplyScalar(fp.pull)));
+  for (const r of rounds) gb.expandByPoint(r.home.clone().addScalar(30));
+  // 맞춤은 중심면에서 재는데 카메라에 가까운 면은 그보다 크게 잡힌다. 총을 꽉 채우는 화면은
+  // 그 차이가 그대로 잘림으로 나오므로 테두리를 둔다. 분해·사격 화면은 범위가 커서 안 걸린다.
+  fitLoad = fitOf(gb.expandByScalar(40));
+
+  // 사격 화면은 bbox 로 맞추지 않는다. 총을 꽉 채우면 과녁이 안 보이고,
+  // 사선 전체를 담으면 총이 점이 된다. 사선 중간을 보고 총이 앞쪽에 걸리게 직접 잡는다.
+  fitFire = { center: V(-340, 170, 0), w: 1700, h: 980 };
+}
+
+// 총은 -x 를 본다. 조준각을 그대로 먹인 오일러로 방향과 총구 위치를 둘 다 뽑아
+// 눈에 보이는 각도와 명중 판정이 어긋나지 않게 한다.
+const syncAim = () => aimE.set(0, aimB, -aimA, 'YZX');
+const fwd = () => V(-1, 0, 0).applyEuler(aimE);
+const muzzleNow = () =>
+  V(...rig().muzzle, 0).sub(gunCenter).applyEuler(aimE).add(gunCenter);
+
+// 포인터가 가리키는 지점을 겨눈다. 과녁에 걸리면 그 과녁, 아니면 사선 끝 벽.
+const backstop = new THREE.Plane(V(1, 0, 0), 980);
+function aimPoint(e) {
+  const r = viewRect();
+  ndc.set((e.clientX - r.left) / r.width * 2 - 1, -((e.clientY - r.top) / r.height * 2 - 1));
+  ray.setFromCamera(ndc, camera);
+  const hit = ray.intersectObjects(targets.filter(t => !t.down).map(t => t.mesh), true)[0];
+  if (hit) return range.worldToLocal(hit.point.clone());
+  const far = ray.ray.intersectPlane(backstop, V());
+  return far ? range.worldToLocal(far) : null;
+}
+function aimAt(e) {
+  const p = aimPoint(e);
+  if (!p) return;
+  // 총을 돌리면 총구 자체가 움직인다. "지금 각도의 총구에서 다시 재기"를 되풀이해 수렴시킨다.
+  for (let i = 0; i < 4; i++) {
+    const d = p.clone().sub(muzzleNow());
+    aimB = Math.max(-AIM_MAX, Math.min(AIM_MAX, Math.atan2(d.z, -d.x)));
+    aimA = Math.max(-AIM_MAX, Math.min(AIM_MAX, Math.atan2(d.y, Math.hypot(d.x, d.z))));
+    syncAim();
+  }
+}
+// 총구에서 쏜 선에 가장 먼저 걸리는 과녁. 반지름 안에 들어오면 명중.
+function hitTarget() {
+  const m = muzzleNow(), d = fwd();
+  let best = null, bestAt = Infinity;
+  for (const t of targets) {
+    if (t.down) continue;
+    const w = t.p.clone().sub(m), at = w.dot(d);
+    if (at <= 0 || at >= bestAt) continue;
+    if (w.distanceTo(d.clone().multiplyScalar(at)) < TR) { best = t; bestAt = at; }
+  }
+  return best;
+}
+// 예광탄. 탄이 사선을 따라 날아가는 걸 보여주는 것만으로 거리가 읽힌다.
+let tracers = [];
+function tracer() {
+  const m = new THREE.Mesh(new THREE.BoxGeometry(80, 3, 3),
+                           new THREE.MeshBasicMaterial({ color: 0xffd79a }));
+  m.position.copy(muzzleNow());
+  m.rotation.copy(aimE);
+  range.add(m);
+  tracers.push({ mesh: m, d: fwd(), born: performance.now() });
+}
+function knock(t) {
+  t.down = true; t.fell = performance.now();
+  fire.hits++;
+  tone(880, 0.08, 0.08); setTimeout(() => tone(1320, 0.12, 0.07), 60);
+  if (targets.every(x => x.down)) {
+    fire.clear = Math.max(1, Math.round((Date.now() - fire.t0) / 1000));
+    stop(); sndBest();
+    try {
+      const prev = +(localStorage.getItem('fieldstrip.range') || 0);
+      if (!prev || fire.clear < prev) localStorage.setItem('fieldstrip.range', fire.clear);
+    } catch {}
+  }
+}
+
+/* ---------- 카메라 궤도 ---------- */
+// 시점은 모드마다 다르다. 분해는 빠지는 축(-x)과 시선이 수직이어야 하고,
+// 사격은 사선을 따라 들여다봐야 거리가 보인다. 둘을 한 각도로 만족시킬 수 없다.
+const VIEW = {
+  strip: { az: -0.34, pol: 1.17, azMin: -1.25, azMax: 0.55, polMin: 0.72, polMax: 1.95 },
+  shoot: { az:  1.36, pol: 1.16, azMin:  0.55, azMax: 1.52, polMin: 0.85, polMax: 1.60 },
+};
+// 사격 모드에서도 장전 중에는 분해 시점이 낫다. 탄창과 탄약이 옆에서 보여야 집힌다.
+const viewNow = () => (mode === 'fire' && fire && !fire.magOut) ? VIEW.shoot : VIEW.strip;
+let az = VIEW.strip.az, pol = VIEW.strip.pol, dist = 1, camAuto = true;
+// 사격 자세에서는 1인칭이다. 눈과 보는 점을 SVG 좌표로 적고 현재 화면 기준으로 옮긴다.
+// 정조준 자세. 눈을 가늠자 바로 뒤 조준선에 놓고 총열을 따라 본다.
+// 카메라는 총을 따라 돌지 않는다 — 포인터로 겨누는데 시야까지 따라 돌면 서로 밀어내며 발산한다.
+// 대신 총이 시야 안에서 돌아가므로 "어디를 겨누는 중인지"가 그대로 보인다.
+// (LOOK 은 재질 표 이름이라 LOOKAT 으로 쓴다)
+const EYE = V(700, 40, 0), LOOKAT = V(-1500, 62, 0);
+const FOV = { orbit: 32, ads: 30 };
+let ads = false;
+const fpsNow = () => ads && mode === 'fire' && fire && !fire.magOut;
+const toWorld = p => V(p.x - curFit.center.x, -(p.y - curFit.center.y), -(p.z - curFit.center.z));
+
+const camPos = V(), camAt = V();
+let camReady = false;
+function placeCamera(k = 1) {
+  const p = V(), a = V();
+  if (fpsNow()) { p.copy(toWorld(EYE)); a.copy(toWorld(LOOKAT)); }
+  else {
+    p.set(dist * Math.sin(pol) * Math.sin(az), dist * Math.cos(pol), dist * Math.sin(pol) * Math.cos(az));
+  }
+  if (!camReady) { k = 1; camReady = true; }
+  camPos.lerp(p, k); camAt.lerp(a, k);
+  const fov = fpsNow() ? FOV.ads : FOV.orbit;
+  if (Math.abs(camera.fov - fov) > 0.05) {
+    camera.fov += (fov - camera.fov) * k;
+    camera.updateProjectionMatrix();
+  }
+  camera.position.copy(camPos);
+  camera.lookAt(camAt);
+}
+// 컨테이너 크기만 본다. innerWidth 는 패널이 숨겨지면 0 이 되어 못 쓴다.
+function resize() {
+  const r = viewRect();
+  const w = Math.max(1, r.width), h = Math.max(1, r.height);
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  stepFit(0);                            // 화면비가 바뀌었으니 거리만 다시 센다
+  camera.updateProjectionMatrix();
+  placeCamera();
+}
+new ResizeObserver(resize).observe(view);
+
+/* ---------- 소리 ---------- */
+// 파일 없이 노이즈 버스트로 금속음을 만든다. 첫 소리는 포인터 조작 중에 나므로 자동재생 제한에 안 걸린다.
+let ac = null, muted = false;
+function clack(dur, freq, gain, q = 1.2) {
+  if (muted) return;
+  ac ||= new (window.AudioContext || window.webkitAudioContext)();
+  const n = Math.floor(ac.sampleRate * dur), buf = ac.createBuffer(1, n, ac.sampleRate);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random() * 2 - 1) * (1 - i / n) ** 3;
+  const src = ac.createBufferSource(); src.buffer = buf;
+  const bp = ac.createBiquadFilter(); bp.type = 'bandpass'; bp.frequency.value = freq; bp.Q.value = q;
+  const g = ac.createGain(); g.gain.value = gain;
+  src.connect(bp).connect(g).connect(ac.destination); src.start();
+}
+function tone(freq, dur, gain = 0.07) {
+  if (muted) return;
+  ac ||= new (window.AudioContext || window.webkitAudioContext)();
+  const o = ac.createOscillator(), g = ac.createGain();
+  o.type = 'triangle'; o.frequency.value = freq;
+  g.gain.setValueAtTime(gain, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.0001, ac.currentTime + dur);
+  o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + dur);
+}
+const sndSeat  = () => { clack(0.05, 2200, 0.3); setTimeout(() => clack(0.09, 900, 0.22), 30); };
+const sndBad   = () => clack(0.16, 220, 0.22, 0.7);
+const sndDone  = () => [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => tone(f, 0.3), i * 95));
+const sndBest  = () => [523, 659, 784, 1047, 1319].forEach((f, i) => setTimeout(() => tone(f, 0.34, 0.09), i * 85));
+const sndStage = () => { tone(784, 0.14, 0.05); setTimeout(() => tone(1047, 0.18, 0.05), 90); };
+const sndLoad  = () => clack(0.04, 1500, 0.22);
+const sndRack  = () => { clack(0.07, 1100, 0.3, 0.9); setTimeout(() => clack(0.08, 1700, 0.3), 110); };
+const sndDry   = () => clack(0.03, 2600, 0.18);
+// 총성: 저역 몸통 + 고역 크랙을 겹친다. 에셋 없이 노이즈만으로 할 수 있는 한계가 이 둘이다.
+const sndShot  = () => { clack(0.26, 150, 0.9, 0.5); clack(0.08, 2400, 0.45, 0.8);
+                         setTimeout(() => clack(0.14, 700, 0.2, 0.6), 24); };
+
+/* ---------- 상태 ---------- */
+let mode = 'learn', s = init(gun), t0 = null, timer = null, drag = null, doneMsg = '', sel = null;
+let want = null, note = '';
+let fire = null;                 // 사격 모드 상태. 다른 모드에서는 null.
+const secs = () => t0 ? Math.floor((Date.now() - t0) / 1000) + s.wrong * 3 : 0;
+const stop = () => { clearInterval(timer); timer = null; };
+// 시계만 갱신한다. render() 로 돌리면 aria-live 가 0.5초마다 설명을 통째로 다시 읽는다.
+const tick = () => {
+  const c = el('clock'); if (!c) return;
+  c.textContent = `${mode === 'fire' ? Math.round((Date.now() - fire.t0) / 1000) : secs()}초`;
+};
+
+// 총마다 단계 수가 달라 기록도 총마다 따로 둔다. 예전 단일 키는 G17형 기록으로 읽어준다.
+const BEST = g => `fieldstrip.best.${g}`;
+function bestOf(g) {
+  try { return +(localStorage.getItem(BEST(g)) || (g === 'g17' && localStorage.getItem('fieldstrip.best')) || 0) || 0; }
+  catch { return 0; }
+}
+
+/* ---------- 그리기 ---------- */
+// 차례인 부품이 다른 부품 안에 묻혀 있으면 가리는 쪽을 비춰 보이게 한다.
+// 총마다 표를 만들지 않으려고 "더 두껍고 중심을 품는 부품"이라는 규칙으로 찾는다.
+function veiled(id) {
+  const out = new Set();
+  if (!id || !part[id]) return out;
+  const q = part[id], c = q.bb.getCenter(V()), zq = q.bb.max.z - q.bb.min.z;
+  for (const other of Object.keys(part)) {        // 프레임도 후보다. 탄창을 가리는 게 바로 프레임이다.
+    if (other === id || s.removed.includes(other)) continue;
+    const o = part[other];
+    if (o.bb.max.z - o.bb.min.z > zq && o.bb.containsPoint(c)) out.add(other);
+  }
+  return out;
+}
+
+function paint() {
+  // 자동권총은 탄창을 빼도 윗부분이 그립 안에 남아 프레임까지 비춰야 넣은 총알이 보인다.
+  // 리볼버는 실린더가 통째로 프레임 밖으로 나오므로 실린더만 비추면 된다.
+  const hide = mode === 'fire'
+    ? new Set(fire && fire.magOut ? (isRev() ? [FEED()] : [FEED(), 'frame']) : [])
+    : veiled(want);
+  for (const id of Object.keys(part)) {
+    const q = part[id];
+    const lit = (shaking && shaking.id === id) ? 0x6e1414
+              : (want && id === want && (mode === 'learn' || s.lastError)) ? 0x1d5894
+              : (id === sel) ? 0x59420c : 0x000000;
+    const dim = hide.has(id);
+    for (const m of q.mats) {
+      m.emissive.setHex(lit);
+      // transparent 는 셰이더 프로그램 키라 바뀔 때 needsUpdate 를 켜야 실제로 반영된다.
+      if (m.transparent !== dim) { m.transparent = dim; m.needsUpdate = true; }
+      m.opacity = dim ? 0.3 : 1; m.depthWrite = !dim;
+    }
+  }
+}
+
+function render() {
+  want = mode === 'fire' ? null : expected(s);
+  if (mode !== 'fire') for (const p of partsOf(gun)) part[p.id].tt = s.removed.includes(p.id) ? 1 : 0;
+  paint();
+  if (mode === 'fire') return renderFire();
+
+  const n = orderOf(gun).length;
+  const step = s.phase === 'strip' ? s.removed.length + 1 : n - s.removed.length + 1;
+  if (s.done) {
+    const next = mode === 'learn' ? ' · <span class="n">이제 힌트 없이 — 게임 모드로</span>' : '';
+    el('hud').innerHTML = `<b>완료.</b> 오답 ${s.wrong}회${doneMsg}${next}<br><span class="n">R 키로 한 번 더</span>`;
+    return stop();
+  }
+  const head = `${s.phase === 'strip' ? '분해' : '조립'} ${step}/${n}`;
+  const cur = sel ? ` · <span class="n">선택 ${label(sel)}</span>` : '';
+  const best = bestOf(gun);
+  const body = mode === 'learn'
+    ? `<b>${label(want)}</b> — ${partsOf(gun).find(p => p.id === want)[s.phase === 'strip' ? 'off' : 'on']}`
+    : `<span id="clock" aria-hidden="true">${secs()}초</span> · 오답 ${s.wrong}회 (1회당 +3초)` +
+      (best ? ` · <span class="n">최고 ${best}초</span>` : '');
+  const err = s.lastError ? `<br><span class="bad">${label(s.lastError)} 차례가 아니다.</span>` : '';
+  el('hud').innerHTML = `${head}${cur}<br>${body}${err}`;
+}
+
+/* ---------- 사격 모드 ---------- */
+// 분해와 같은 축 끌기를 그대로 쓴다. 탄창은 제자리 축으로 끼우고, 슬라이드만 뒤로 당긴다.
+const RACK = { dir: V(1, 0, 0), pull: 46 };
+const axisOf = q => (mode === 'fire' && q.id === 'slide') ? RACK : q;
+const say = t => { note = t; render(); };
+
+function startFire() {
+  fire = { inMag: 0, chambered: false, locked: false, spent: 0, cases: 0, magOut: true,
+           hits: 0, t0: null, clear: 0 };
+  aimA = 0;
+  for (const t of targets) { t.down = false; t.fell = 0; t.mesh.visible = true;
+                             t.mesh.position.copy(t.p); t.mesh.rotation.set(0, 0, 0); }
+  s = init(gun);
+  for (const r of rounds) { r.in = 'tray'; r.mesh.visible = true; tagRound(r, true);
+                            range.add(r.mesh); r.mesh.position.copy(r.home); }
+  for (const p of partsOf(gun)) { part[p.id].tt = 0; }
+  part[FEED()].tt = 1;
+  if (isRev()) { spinTo = 0; part.cylinder.obj.userData.spin.rotation.x = 0; }
+  note = '';
+  render();
+}
+
+const openWord = () => isRev() ? '실린더' : '탄창';
+
+function loadRound() {
+  if (!fire.magOut) return say(`${openWord()}을 열고 넣어야 한다.`);
+  const r = rounds.find(x => x.in === 'tray');
+  if (!r) return say(`${openWord()}이 가득 찼다.`);
+  r.in = 'mag'; fire.inMag++; tagRound(r, false);
+  feedHost().add(r.mesh);
+  restack(); sndLoad(); say('');
+}
+
+function feed() {
+  const r = rounds.filter(x => x.in === 'mag').at(-1);   // 맨 위(급탄구) 것이 먹힌다
+  if (!r) return false;
+  r.in = 'gone'; r.mesh.visible = false; fire.inMag--; restack();
+  return true;
+}
+
+// 자동권총 전용. 리볼버는 실린더를 닫으면 바로 쏠 수 있다.
+function rack() {
+  if (isRev()) return say('리볼버는 장전손잡이가 없다. 실린더를 닫고 쏜다.');
+  if (fire.magOut && fire.inMag === 0 && !fire.chambered) return say('탄창부터 끼워야 먹인다.');
+  if (fire.chambered) { eject(); fire.chambered = false; }
+  if (!fire.magOut) fire.chambered = feed();
+  fire.locked = false;
+  part.slide.tt = 0;
+  sndRack(); say('');
+}
+
+function startShotClock() {
+  if (fire.t0) return;
+  fire.t0 = Date.now();
+  timer = setInterval(tick, 500);
+}
+
+function shoot() {
+  if (isRev()) return shootRev();
+  if (!fire.chambered) { sndDry(); return say('약실이 비었다. 슬라이드를 당겼다 놓는다.'); }
+  fire.chambered = false; fire.spent++; startShotClock();
+  flashAt = performance.now(); cycling = performance.now(); kick = 0.05;
+  eject(); sndShot(); tracer();
+  const t = hitTarget(); if (t) knock(t);
+  if (!fire.magOut) {
+    fire.chambered = feed();
+    if (!fire.chambered) fire.locked = true;             // 탄창이 비면 슬라이드가 뒤에서 멈춘다
+  }
+  say('');
+}
+
+// 리볼버는 쏠 때마다 실린더가 한 칸 돈다. 빈 탄피는 실린더에 남았다가 열 때 한꺼번에 빠진다.
+function shootRev() {
+  if (fire.magOut) { sndDry(); return say('실린더를 닫아야 쏜다.'); }
+  if (fire.inMag === 0) { sndDry(); return say('탄이 없다. 실린더를 열고 채운다.'); }
+  feed(); fire.spent++; fire.cases++; startShotClock();
+  spinTo += Math.PI * 2 / part.cylinder.obj.userData.nch;
+  flashAt = performance.now(); kick = 0.06;
+  sndShot(); tracer();
+  const t = hitTarget(); if (t) knock(t);
+  say('');
+}
+
+function eject() {
+  const m = makeRound();
+  m.children[1].visible = false;                          // 탄두는 날아갔다. 탄피만 나온다.
+  m.position.copy(port).add(part.slide ? part.slide.obj.position : V());
+  range.add(m);
+  brass.push({ mesh: m, born: performance.now(),
+               v: V(70 + Math.random() * 50, -170 - Math.random() * 70, 50) });
+}
+
+function renderFire() {
+  const f = fire, w = openWord(), rev = isRev();
+  const dots = '●'.repeat(f.inMag) + '○'.repeat(MAG - f.inMag);
+  const state = rev ? (f.magOut ? '<span class="n">열림</span>' : '닫힘')
+                    : (f.magOut ? '<span class="n">뺀 상태</span>' : '장착');
+  const chamber = rev ? (f.cases ? `<span class="n">빈 탄피 ${f.cases}</span>` : '')
+                      : (f.chambered ? '<b>약실 ●</b>' : '<span class="n">약실 ○</span>');
+  const head = `${w} ${state} ${dots}${chamber ? ' · ' + chamber : ''} · 쏜 탄 ${f.spent}`;
+  const guide = rev
+    ? ( f.magOut && f.inMag < MAG ? '총알을 눌러 약실에 넣는다. (L)'
+      : f.magOut                  ? '실린더를 밀어 닫는다. (M)'
+      : f.inMag === 0             ? '다 쐈다. 실린더를 열어 탄피를 빼낸다. (M)'
+      :                             '총을 눌러 쏜다. (Enter)')
+    : ( f.locked                  ? '탄창이 비어 슬라이드가 멈췄다. 탄창을 빼고 다시 채운다. (M)'
+      : f.magOut && f.inMag < MAG ? '총알을 눌러 탄창에 넣는다. (L)'
+      : f.magOut                  ? '탄창을 위로 밀어 넣는다. (M)'
+      : !f.chambered              ? '슬라이드를 뒤로 당겼다 놓는다. (R)'
+      :                             '총을 눌러 쏜다. (Enter)');
+  const left = targets.filter(t => !t.down).length;
+  let best = 0; try { best = +(localStorage.getItem('fieldstrip.range') || 0); } catch {}
+  const score = f.clear
+    ? `<b>클리어 ${f.clear}초</b> · ${f.hits}/${f.spent}발${best && f.clear > best ? ` · <span class="n">최고 ${best}초</span>` : ''}`
+    : `과녁 ${TGT.length - left}/${TGT.length} · ${f.hits}/${f.spent}발` +
+      (f.t0 ? ` · <span id="clock" aria-hidden="true">${Math.round((Date.now() - f.t0) / 1000)}초</span>` : '') +
+      (best ? ` · <span class="n">최고 ${best}초</span>` : '');
+  const err = note ? `<br><span class="bad">${note}</span>` : '';
+  const line = f.clear ? '<span class="n">다시 누르면 처음부터</span>' : guide;
+  el('hud').innerHTML = `${head} · ${score}<br><b>${line}</b>${err}`;
+}
+
+/* ---------- 집기 / 축 방향으로 끌기 ---------- */
+const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+function pick(e) {
+  const r = viewRect();
+  ndc.set((e.clientX - r.left) / r.width * 2 - 1, -((e.clientY - r.top) / r.height * 2 - 1));
+  ray.setFromCamera(ndc, camera);
+  const hits = ray.intersectObjects([model, range], true)
+    .map(h => h.object.userData.part).filter(Boolean);
+  if (!hits.length) return null;
+  if (hits[0] === 'round') return 'round';
+  const real = hits.filter(id => id !== 'round' && id !== 'frame');
+  if (!real.length) return hits.includes('frame') ? 'frame' : null;
+  // 여유 박스끼리 겹치는 자리에서는 지금 차례인 부품을 먼저 집는다.
+  return (want && real.includes(want)) ? want : real[0];
+}
+// 그 부품의 이동 축이 화면에서 몇 픽셀짜리 벡터인지. 끌기 양을 여기에 투영한다.
+function screenAxis(id) {
+  const p = part[id];
+  const sz = renderer.getSize(new THREE.Vector2());
+  const to = v => { const q = v.clone().project(camera);
+                    return new THREE.Vector2(q.x * sz.x / 2, -q.y * sz.y / 2); };
+  // 반드시 부품 자신의 위치에서 재야 한다. 모델 원점은 화면 밖이라 투영이 발산한다.
+  const here = p.c0.clone().add(p.obj.position);
+  const w0 = model.localToWorld(here.clone());
+  const w1 = model.localToWorld(here.add(stepOf(p, p.t)));
+  return to(w1).sub(to(w0));
+}
+
+renderer.domElement.addEventListener('pointerdown', e => {
+  if (drag) return;                        // 두 번째 손가락은 무시. 진행 중인 드래그를 덮으면 부품이 순간이동한다.
+  renderer.domElement.setPointerCapture(e.pointerId);
+  const id = (mode !== 'fire' && s.done) ? null : pick(e);
+  if (id === 'round') { if (mode === 'fire') loadRound(); return; }
+  const grab = id && id !== 'frame' && (mode !== 'fire' || id === FEED() || id === 'slide');
+  // 터치에는 호버가 없다. 누른 지점을 바로 겨눠야 폰에서도 조준이 된다.
+  if (mode === 'fire' && !grab) aimAt(e);
+  drag = grab
+    ? { pid: e.pointerId, id, x: e.clientX, y: e.clientY, t0: part[id].t, sa: screenAxis(id), moved: 0 }
+    : { pid: e.pointerId, orbit: true, onGun: mode === 'fire', x: e.clientX, y: e.clientY, moved: 0 };
+});
+
+renderer.domElement.addEventListener('pointermove', e => {
+  if (mode === 'fire' && !drag) return aimAt(e);     // 그냥 움직이면 조준, 끌면 시점
+  if (!drag || e.pointerId !== drag.pid) return;
+  const [dx, dy] = [e.clientX - drag.x, e.clientY - drag.y];
+  if (drag.orbit) {
+    drag.moved += Math.hypot(dx, dy);
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (fpsNow()) return aimAt(e);         // 1인칭에서는 끌어도 시점이 아니라 조준이다
+    const vw = viewNow();
+    camAuto = false;                       // 직접 돌렸으면 자동 전환을 멈춘다
+    az = Math.min(vw.azMax, Math.max(vw.azMin, az - dx * 0.005));
+    pol = Math.min(vw.polMax, Math.max(vw.polMin, pol - dy * 0.005));
+    return placeCamera();
+  }
+  drag.moved = Math.hypot(dx, dy);
+  const sa = drag.sa, len2 = sa.x * sa.x + sa.y * sa.y;
+  if (!len2) return;
+  const p = part[drag.id];
+  p.t = Math.min(1, Math.max(0, drag.t0 + (dx * sa.x + dy * sa.y) / len2));
+  p.tt = p.t;
+});
+
+// 순서 판정 한 곳. 드래그와 키보드가 같이 쓴다.
+function apply(id) {
+  const next = tap(s, id);
+  if (next.wrong > s.wrong) { shake(id); sndBad(); }
+  else if (next.removed.length !== s.removed.length) sndSeat();
+  const staged = next.phase !== s.phase;
+  s = next;
+  if (staged) sndStage();                  // 분해 끝 → 조립 시작. 루프의 중간 정점이라 비워두지 않는다.
+  if (s.done) doneMsg = finishLine();
+  render();                                // tt 가 다시 계산되고, 실패하면 원위치로 돌아간다
+}
+
+// 게임 모드 기록. 다시 할 이유를 만드는 유일한 장치라 완료 시점에 한 번만 계산한다.
+function finishLine() {
+  if (mode !== 'game') { sndDone(); return ''; }
+  const t = secs(), prev = bestOf(gun);
+  if (!prev || t < prev) {
+    try { localStorage.setItem(BEST(gun), t); } catch {}
+    sndBest();
+    return ` · <b>신기록 ${t}초</b>${prev ? ` (이전 ${prev}초)` : ''}`;
+  }
+  sndDone();
+  return ` · ${t}초 · 최고 ${prev}초`;
+}
+
+function drop(e) {
+  if (!drag || e.pointerId !== drag.pid) return;
+  const d = drag;
+  drag = null;
+  if (d.orbit) {                           // 사격 모드에서 가볍게 누르면 겨눈 쪽으로 발사
+    if (d.onGun && d.moved < 12) shoot();
+    return;
+  }
+  const p = part[d.id];
+  // 절반 넘게 끌면 뽑은 것(또는 끼운 것)으로 친다. 12px 미만은 탭으로 친다(2D 와 같은 값).
+  const crossed = d.moved < 12 || (d.t0 < 0.5 ? p.t > 0.5 : p.t < 0.5);
+  if (mode === 'fire') return dropFire(d.id, crossed, d.moved);
+  if (crossed) apply(d.id);
+  else render();
+}
+
+function dropFire(id, crossed, moved) {
+  if (id === 'slide') {
+    if (moved < 12) shoot();               // 슬라이드를 톡 치면 발사, 끝까지 당기면 장전
+    else if (crossed) rack();
+    else part.slide.tt = fire.locked ? 0.62 : 0;
+    return render();
+  }
+  if (id === FEED()) {
+    if (crossed) toggleFeed(); else part[FEED()].tt = fire.magOut ? 1 : 0;
+    return render();
+  }
+  render();
+}
+
+// 탄창 넣고 빼기 = 실린더 열고 닫기. 같은 축 끌기라 한 함수로 둔다.
+function toggleFeed() {
+  fire.magOut = !fire.magOut;
+  camAuto = true;                                // 장전 ↔ 사격 시점을 다시 따라가게
+  part[FEED()].tt = fire.magOut ? 1 : 0;
+  sndSeat();
+  if (isRev() && fire.magOut && fire.cases) {    // 열면 빈 탄피가 한꺼번에 빠진다 (추출간)
+    for (let i = 0; i < fire.cases; i++) eject();
+    fire.cases = 0;
+  }
+  if (!isRev() && !fire.magOut && !fire.chambered) note = '슬라이드를 당겼다 놓으면 먹인다.';
+  else note = '';
+}
+renderer.domElement.addEventListener('pointerup', drop);
+renderer.domElement.addEventListener('pointercancel', drop);
+
+// 드래그가 안 되는 환경용. 차례인 부품을 고르게 해주면 게임 모드가 저절로 풀리므로 커서는 늘 첫 부품에서 시작한다.
+renderer.domElement.tabIndex = 0;
+renderer.domElement.setAttribute('role', 'application');
+renderer.domElement.setAttribute('aria-label',
+  '화살표로 부품을 고르고 Enter 로 분해·조립. 사격 모드에서는 L 장전, M 탄창, R 슬라이드, A 정조준, Enter 발사.');
+renderer.domElement.addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (mode === 'fire') {
+    if (e.key === 'ArrowUp')         { aimA = Math.max(-AIM_MAX, aimA - 0.04); syncAim(); }
+    else if (e.key === 'ArrowDown')  { aimA = Math.min(AIM_MAX, aimA + 0.04); syncAim(); }
+    else if (e.key === 'ArrowLeft')  { aimB = Math.max(-AIM_MAX, aimB - 0.04); syncAim(); }
+    else if (e.key === 'ArrowRight') { aimB = Math.min(AIM_MAX, aimB + 0.04); syncAim(); }
+    else if (k === 'l') loadRound();
+    else if (k === 'r') rack();
+    else if (k === 'm') { toggleFeed(); render(); }
+    else if (k === 'a') setAds(!ads);
+    else if (e.key === 'Enter' || e.key === ' ') shoot();
+    else return;
+    return e.preventDefault();
+  }
+  const order = orderOf(gun), i = order.indexOf(sel);
+  if (k === 'r') restart();
+  else if (e.key === 'ArrowDown' || e.key === 'ArrowRight') sel = order[(i + 1) % order.length];
+  else if (e.key === 'ArrowUp' || e.key === 'ArrowLeft') sel = order[(i - 1 + order.length) % order.length];
+  else if ((e.key === 'Enter' || e.key === ' ') && sel && !s.done) { e.preventDefault(); return apply(sel); }
+  else return;
+  e.preventDefault();
+  render();
+});
+
+let shaking = null;
+const shake = id => { shaking = { id, until: performance.now() + 260 }; };
+
+/* ---------- 루프 ---------- */
+let flashAt = 0, cycling = 0, kick = 0, spinTo = 0;
+function loop() {
+  requestAnimationFrame(loop);
+  const now = performance.now();
+
+  const sp = part.cylinder && part.cylinder.obj.userData.spin;
+  if (sp) sp.rotation.x += (spinTo - sp.rotation.x) * 0.25;
+  if (cycling) {                           // 발사 반동으로 슬라이드가 한 번 왕복한다
+    const u = (now - cycling) / 130;
+    if (u >= 1) { cycling = 0; if (part.slide) part.slide.tt = (fire && fire.locked) ? 0.62 : 0; }
+    else part.slide.tt = Math.sin(u * Math.PI) * 0.5;
+  }
+  const lit = now - flashAt < 70;
+  flashLight.intensity = lit ? 6e5 : 0;
+  if (lit) flashLight.position.copy(muzzle).add(part.barrel ? part.barrel.obj.position : V());
+  kick *= 0.86;
+  aim.rotation.set(0, aimB, -(aimA - kick), 'YZX');   // 반동은 총구를 들어올린다
+
+  if (camAuto) {                          // 장전 ↔ 사격 시점과 범위를 부드럽게 옮긴다
+    const vw = viewNow();
+    az += (vw.az - az) * 0.08;
+    pol += (vw.pol - pol) * 0.08;
+    stepFit(0.08);
+    placeCamera(0.09);
+  }
+  for (let i = tracers.length - 1; i >= 0; i--) {
+    const tc = tracers[i];
+    tc.mesh.position.addScaledVector(tc.d, 46);
+    if (now - tc.born > 150) { range.remove(tc.mesh); disposeTree(tc.mesh); tracers.splice(i, 1); }
+  }
+
+  for (const t of targets) {              // 맞은 과녁은 뒤로 넘어간다
+    if (!t.down) continue;
+    const u = Math.min(1, (now - t.fell) / 420);
+    t.mesh.rotation.z = u * 1.5;          // 사선 반대쪽으로 넘어간다
+    t.mesh.position.y = t.p.y + u * u * 30;
+  }
+
+  for (const p of partsOf(gun)) {
+    const q = part[p.id], a = axisOf(q);
+    // 끝에서 스냅한다. 0.22 보간은 영영 안 닿아서 가지런히 놓은 줄이 미세하게 어긋난다.
+    if (!drag || drag.id !== p.id)
+      q.t = Math.abs(q.tt - q.t) < 0.004 ? q.tt : q.t + (q.tt - q.t) * 0.22;
+    posOf(q, q.t, q.obj.position);
+    // 학습 모드에서 차례인 부품을 자기 축으로 까딱인다. 그립 안에 묻힌 탄창도 이러면 보인다.
+    if (mode === 'learn' && p.id === want && (!drag || drag.id !== p.id))
+      q.obj.position.addScaledVector(a.dir, a.pull * 0.035 * (1 + Math.sin(now * 0.006)));
+    if (shaking && shaking.id === p.id) {
+      if (shaking.until - now <= 0) { shaking = null; paint(); }
+      else q.obj.position.x += Math.sin((shaking.until - now) * 0.08) * 6;
+    }
+  }
+
+  for (let i = brass.length - 1; i >= 0; i--) {
+    const b = brass[i];
+    b.mesh.position.addScaledVector(b.v, 1 / 60);
+    b.v.y += 900 / 60;                     // SVG 기준이라 +y 가 아래다
+    b.mesh.rotation.z += 0.4; b.mesh.rotation.x += 0.3;
+    if (now - b.born > 1400) { range.remove(b.mesh); disposeTree(b.mesh); brass.splice(i, 1); }
+  }
+  renderer.render(scene, camera);
+}
+
+/* ---------- 모드 / 총 ---------- */
+// 정조준은 사격 모드 안의 자세 토글이다. 모드가 아니라서 버튼도 사격일 때만 나온다.
+function setAds(on) {
+  ads = on;
+  el('ads').ariaPressed = on;
+  camAuto = true;
+  render();
+}
+
+function setMode(m) {
+  mode = m;
+  ads = false; el('ads').ariaPressed = false; el('ads').hidden = m !== 'fire';
+  for (const id of ['learn', 'game', 'fire']) el(id).ariaPressed = m === id;
+  el('tip').textContent = m === 'fire'
+    ? (isRev() ? '총알을 눌러 약실에 넣고 · 실린더를 닫고 · 총을 눌러 쏜다 · A 로 정조준'
+               : '총알을 눌러 탄창에 넣고 · 탄창을 끼우고 · 슬라이드를 당겼다 놓고 · 총을 눌러 쏜다 · A 로 정조준')
+    : '부품은 실제로 빠지는 방향으로만 끌린다 · 빈 곳을 끌면 시점이 돈다 · 키보드는 화살표로 고르고 Enter';
+  restart();
+}
+function restart() {
+  stop(); t0 = null; doneMsg = ''; drag = null; sel = null; note = '';
+  shaking = null; cycling = 0; flashAt = 0; kick = 0;
+  for (const b of brass) { range.remove(b.mesh); disposeTree(b.mesh); }
+  brass = [];
+  for (const r of rounds) r.mesh.visible = mode === 'fire';
+  for (const t of targets) t.mesh.visible = mode === 'fire';
+  if (lane) lane.visible = mode === 'fire';
+  for (const tc of tracers) { range.remove(tc.mesh); disposeTree(tc.mesh); }
+  tracers = [];
+  aimA = aimB = 0; syncAim(); camAuto = true;
+  const vw = viewNow(); az = vw.az; pol = vw.pol;
+  applyFit(); resize();
+  if (mode === 'fire') return startFire();
+  fire = null;
+  s = init(gun);
+  if (mode === 'game') { t0 = Date.now(); timer = setInterval(tick, 500); }
+  render();
+}
+function setGun(g) {
+  gun = g;
+  build(gun);
+  resize();
+  restart();
+}
+
+el('gun').innerHTML = GUN_IDS.map(g => `<option value="${g}">${GUNS[g].ko}</option>`).join('');
+el('gun').onchange = e => setGun(e.target.value);
+el('learn').onclick = () => setMode('learn');
+el('game').onclick  = () => setMode('game');
+el('fire').onclick  = () => setMode('fire');
+el('ads').onclick   = () => { setAds(!ads); renderer.domElement.focus(); };   // 포커스를 돌려줘야 Enter 가 발사로 간다
+el('reset').onclick = restart;
+el('sound').onclick = () => { muted = !muted; el('sound').ariaPressed = !muted; };
+el('eye').onclick = () => { const vw = viewNow(); az = vw.az; pol = vw.pol; camAuto = true; };
+
+build(gun); resize(); setMode('learn'); loop();
+</script>

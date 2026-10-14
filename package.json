@@ -1,0 +1,16 @@
+{
+  "name": "field-strip",
+  "version": "1.0.0",
+  "description": "",
+  "scripts": {
+    "test": "node test.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "three": "^0.186.1"
+  },
+  "private": true
+}
