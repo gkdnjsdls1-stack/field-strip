@@ -70,34 +70,6 @@ export const SHAPES = {
     },
   },
 
-  // 슬라이드 윗면이 뚫려 있어 조립 상태에서도 배럴이 보인다. 그 틈이 이 총의 얼굴이다.
-  m92: {
-    barrel: {
-      d: 'M122 70 H400 L408 64 H444 Q452 64 452 72 V88 Q452 96 444 96 H408 L400 90 H122 Z',
-      depth: 25, axis: [-1, 0, 0], pull: 150,
-    },
-    spring: { axis: [-1, 0.7, 0], pull: 150, coil: [134, 386, 94, 8] },
-    frame: {
-      d: `M125 106 H458 L470 122 L478 290 Q480 306 464 308 L398 304 Q386 303 385 292
-          L374 192 Q372 180 362 180 L298 180 Q285 180 283 164 L280 138 Q279 130 268 130 L125 130 Z
-          M296 136 H364 Q370 136 369 146 L364 160 Q362 165 354 165 L308 165 Q297 165 295 152 Z`,
-      depth: 52, axis: [0, 0, 0], pull: 0,
-    },
-    magazine: {
-      d: 'M396 154 L458 150 L470 292 L408 298 Z M400 288 L478 283 L482 312 L404 318 Z',
-      depth: 40, axis: [0, 1, 0], pull: 95,
-    },
-    slide: {
-      d: `M125 72 Q125 60 140 60 H210 V74 H388 V60 H450 Q462 60 462 72 V96
-          Q462 106 450 106 H136 Q125 106 125 96 Z`,
-      depth: 48, axis: [-1, -0.8, 0], pull: 175,
-    },
-    lever: {
-      d: 'M282 110 H308 Q318 110 318 122 Q318 136 306 139 L288 142 Q278 140 278 128 Z',
-      depth: 64, axis: [0, 1, 0], pull: 45,
-    },
-  },
-
   // 리볼버. 슬라이드도 탄창도 없다 — 배럴은 프레임에 붙박이고, 실린더가 탄창 역할을 한다.
   // 프레임 경로는 셋: 바깥선 / 방아쇠울 구멍 / 실린더 창. evenodd 로 뒤 둘을 뚫는다.
   revolver: {
@@ -152,36 +124,6 @@ export const SHAPES = {
     },
   },
 
-  // 가스식 대구경. 슬라이드 안에 회전 노리쇠가 따로 들어 있는 유일한 총이다.
-  big: {
-    barrel: {
-      d: 'M108 72 H424 L432 64 H454 Q460 64 460 72 V90 Q460 98 454 98 H432 L424 90 H108 Z',
-      depth: 30, axis: [-1, 0.15, 0], pull: 160,
-    },
-    bolt: {
-      d: 'M330 72 H422 Q432 74 432 85 Q432 97 422 99 H330 Q320 97 320 85 Q320 74 330 72 Z',
-      depth: 36, axis: [-1, -0.2, 0], pull: 150,
-    },
-    spring: { axis: [-1, 0.7, 0], pull: 150, coil: [128, 384, 102, 9] },
-    frame: {
-      d: `M118 112 H466 L478 128 L486 292 Q488 308 472 310 L404 306 Q392 305 391 294
-          L380 198 Q378 186 368 186 L302 186 Q289 186 287 170 L284 144 Q283 136 272 136 L118 136 Z
-          M300 142 H370 Q376 142 375 152 L370 166 Q368 171 360 171 L312 171 Q301 171 299 158 Z`,
-      depth: 56, axis: [0, 0, 0], pull: 0,
-    },
-    magazine: {
-      d: 'M398 158 L464 154 L476 296 L410 302 Z M402 292 L484 287 L488 318 L406 324 Z',
-      depth: 44, axis: [0, 1, 0], pull: 95,
-    },
-    slide: {
-      d: 'M118 68 L150 52 H444 Q462 52 462 70 V100 Q462 112 448 112 H132 Q118 112 118 98 Z',
-      depth: 54, axis: [-1, -0.85, 0], pull: 185,
-    },
-    barrelbolt: {
-      d: 'M152 112 H188 Q196 114 194 124 L188 134 H158 Q150 132 150 122 Z',
-      depth: 56, axis: [0, 1, 0], pull: 60,
-    },
-  },
 };
 
 
@@ -194,14 +136,10 @@ export const RIG = {
               sights: [140, 448, 60, 'slide'] },
   m1911:    { feed: 'magazine', action: 'auto',     muzzle: [124, 82], port: [312, 60],
               sights: [185, 448, 58, 'slide'] },
-  m92:      { feed: 'magazine', action: 'auto',     muzzle: [118, 80], port: [300, 62],
-              sights: [150, 440, 60, 'slide'] },
   revolver: { feed: 'cylinder', action: 'revolver', muzzle: [118, 83],
               sights: [132, 358, 70, 'frame'] },
   pm:       { feed: 'magazine', action: 'auto',     muzzle: [144, 85], port: [300, 66],
               sights: [178, 436, 64, 'slide'] },
-  big:      { feed: 'magazine', action: 'auto',     muzzle: [106, 81], port: [310, 56],
-              sights: [162, 448, 52, 'slide'] },
 };
 
 // 재질 표. 부품 id 가 세 총에서 같은 뜻이라 총마다 다시 쓰지 않는다.
@@ -213,7 +151,6 @@ export const LOOK = {
   magazine:  { color: 0x3d4551, metalness: 0.60, roughness: 0.48 },
   slidelock: { color: 0x8d97a4, metalness: 0.80, roughness: 0.30 },
   slidestop: { color: 0x8d97a4, metalness: 0.80, roughness: 0.30 },
-  lever:     { color: 0x8d97a4, metalness: 0.80, roughness: 0.30 },
   plug:      { color: 0x9aa3ae, metalness: 0.85, roughness: 0.24 },
   bushing:   { color: 0x9aa3ae, metalness: 0.85, roughness: 0.24 },
   cylinder:  { color: 0x8891a0, metalness: 0.85, roughness: 0.26 },
@@ -222,8 +159,6 @@ export const LOOK = {
   yokescrew: { color: 0xa8b0ba, metalness: 0.90, roughness: 0.18 },
   grip:      { color: 0x6b4a2f, metalness: 0.02, roughness: 0.78 },   // 나무 그립. 강철뿐인 화면에서 유일한 대비다.
   guard:     { color: 0x8d97a4, metalness: 0.80, roughness: 0.30 },
-  bolt:      { color: 0xa8b0ba, metalness: 0.90, roughness: 0.18 },
-  barrelbolt:{ color: 0x8d97a4, metalness: 0.80, roughness: 0.30 },
 };
 
 // 1911형 프레임은 알루미늄/강철이라 폴리머 색이 맞지 않는다.
@@ -231,5 +166,4 @@ export const FRAME_LOOK = {
   m1911:    { color: 0x5b626c, metalness: 0.70, roughness: 0.38 },
   revolver: { color: 0x6f7680, metalness: 0.78, roughness: 0.30 },   // 블루잉 강철
   pm:       { color: 0x3a3f47, metalness: 0.62, roughness: 0.42 },
-  big:      { color: 0x5f666f, metalness: 0.72, roughness: 0.34 },
 };

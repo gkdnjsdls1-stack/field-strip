@@ -34,10 +34,10 @@ for (const gun of GUN_IDS) {
   assert.equal(expected(init(gun)), ORDER[0]);
 }
 
-// 총마다 순서가 실제로 다르다. 같으면 두 번째 총을 만든 의미가 없다.
-assert.notDeepEqual(orderOf('g17'), orderOf('m1911'));
-assert.notDeepEqual(orderOf('g17'), orderOf('m92'));
-assert.notDeepEqual(orderOf('g17'), orderOf('revolver'));
+// 총마다 순서가 실제로 다르다. 같으면 그 총을 따로 둔 의미가 없다.
+// 총을 지우거나 늘려도 그대로 도는 전수 비교다 — 짝을 손으로 적어두면 지울 때 같이 썩는다.
+for (const a of GUN_IDS) for (const b of GUN_IDS) if (a < b)
+  assert.notDeepEqual(orderOf(a), orderOf(b), `${a}/${b}: 분해 순서가 같다`);
 
 // 사격 모드가 집어들 부품은 총마다 실제로 존재해야 한다 (탄창 / 실린더)
 const { RIG, SHAPES } = await import('./shapes.js');
