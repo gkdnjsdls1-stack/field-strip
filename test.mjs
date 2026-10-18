@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { GUN_IDS, orderOf, init, expected, tap } from './strip.js';
+import { GUNS, GUN_IDS, orderOf, init, expected, tap } from './strip.js';
 
 for (const gun of GUN_IDS) {
   const ORDER = orderOf(gun);
   assert.ok(ORDER.length >= 3, `${gun}: 단계가 너무 적다`);   // PM형은 배럴이 안 빠져서 넷뿐
   assert.equal(new Set(ORDER).size, ORDER.length, `${gun}: 부품 id 가 겹친다`);
+  assert.ok(GUNS[gun].info?.length, `${gun}: 분해 전 소개(info) 가 없다`);
 
   // 올바른 전체 사이클: 분해 n + 조립 n = 완료, 오답 0
   let s = init(gun);

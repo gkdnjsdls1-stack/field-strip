@@ -711,7 +711,10 @@ function render() {
     : `<span id="clock" aria-hidden="true">${secs()}초</span> · 오답 ${s.wrong}회 (1회당 +3초)` +
       (best ? ` · <span class="n">최고 ${best}초</span>` : '');
   const err = s.lastError ? `<br><span class="bad">${label(s.lastError)} 차례가 아니다.</span>` : '';
-  el('hud').innerHTML = `${head}${cur}<br>${body}${err}`;
+  // 분해 시작 전 한 줄 소개. 첫 부품을 빼면 사라진다 — 단계 설명 자리를 뺏으면 안 된다.
+  const intro = (s.phase === 'strip' && !s.removed.length)
+    ? `<span class="n"><b>${GUNS[gun].ko}</b> — ${GUNS[gun].info}</span><br>` : '';
+  el('hud').innerHTML = `${head}${cur}<br>${intro}${body}${err}`;
 }
 
 /* ---------- 사격 모드 ---------- */
